@@ -3,32 +3,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 import torchvision.models as models
-from tqdm import tqdm
 from efficientnet_pytorch import EfficientNet
 import wandb
 
 
-# def get_network(
-#         options
-# ):
-#     model = None
-#
-#     if options.network == "ResNet":
-#         model = models.resnet18(pretrained=options.model.pretrained)
-#         model.fc = nn.Linear(512, options.data.num_classes)
-#
-#     else:
-#         raise NotImplementedError
-#
-#     return model.to(options.device)
-
 def get_network(
         options
 ):
-    model = None
-
     if options.network == "ResNet":
         model = models.resnet18(pretrained=options.model.pretrained)
         model.fc = nn.Linear(512, options.data.num_classes)

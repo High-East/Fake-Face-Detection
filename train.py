@@ -1,43 +1,45 @@
 '''
 USAGE
-python train.py --config_file=configs/ResNet.yaml
+python train.py --config_file=configs/ResNet.yaml --device=0
 '''
 
 import os
 import time
+import shutil
+from psutil import virtual_memory
+import random
 import fire
 import yaml
-import random
-import torch
-import shutil
-import argparse
-import numpy as np
 from tqdm import tqdm
+import numpy as np
+import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from psutil import virtual_memory
 
-from flags import Flags
 from checkpoint import (
     default_checkpoint,
     load_checkpoint,
     save_checkpoint,
-    init_tensorboard,
-    write_tensorboard,
 )
-from utils import get_network, get_optimizer
+from utils import (
+    get_network,
+    get_optimizer,
+    initialize_wandb,
+    read_yaml,
+    AttrDict
+)
 from dataset import get_train_valid_dataloader
 from metrics import accuracy, precision, recall
 
 
 def run_epoch(
-    options,
-    data_loader,
-    model,
-    epoch_text,
-    optimizer,
-    lr_scheduler,
-    train=True,
+        options,
+        data_loader,
+        model,
+        epoch_text,
+        optimizer,
+        lr_scheduler,
+        train=True,
 ):
     torch.set_grad_enabled(train)
     if train:
@@ -51,10 +53,10 @@ def run_epoch(
     recalls = []
 
     with tqdm(
-        desc="{} ({})".format(epoch_text, "Train" if train else "Valid"),
-        total=len(data_loader.dataset),
-        dynamic_ncols=True,
-        leave=False,
+            desc="{} ({})".format(epoch_text, "Train" if train else "Valid"),
+            total=len(data_loader.dataset),
+            dynamic_ncols=True,
+            leave=False,
     ) as pbar:
         for i, (images, targets) in enumerate(data_loader):
             images = images.to(options.device, torch.float)
@@ -74,7 +76,7 @@ def run_epoch(
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                
+
             losses.append(loss.item())
             acces.append(acc)
             precisions.append(pre)
@@ -82,7 +84,8 @@ def run_epoch(
 
             pbar.update(curr_batch_size)
 
-    lr_scheduler.step()
+    if train:
+        lr_scheduler.step()
 
     result = {
         "loss": np.mean(losses),
@@ -93,20 +96,24 @@ def run_epoch(
 
     return result
 
-def main(config_file):
-    """
-    Train math formula recognition model
-    """
-    options = Flags(config_file).get()
 
+def main(config_file, device=0):
+    # Read config file
+    options = AttrDict(read_yaml(config_file))
+
+    # Start wandb
+    run = initialize_wandb('./configs/wandb.yaml', options)
+
+    # Fix random seed
     random.seed(options.seed)
     np.random.seed(options.seed)
     os.environ["PYTHONHASHSEED"] = str(options.seed)
     torch.manual_seed(options.seed)
     torch.cuda.manual_seed(options.seed)  # type: ignore
     torch.backends.cudnn.deterministic = True  # type: ignore
-    torch.backends.cudnn.benchmark = True  # type: ignore
+    torch.backends.cudnn.benchmark = False  # type: ignore
 
+    # Print environments
     is_cuda = torch.cuda.is_available()
     print("--------------------------------")
     print("Running {} on device {}\n".format(options.network, options.device))
@@ -125,15 +132,15 @@ def main(config_file):
         "Memory Size : {}G\n".format(mem_size),
     )
 
-    checkpoint = (
-        load_checkpoint(options.checkpoint, cuda=is_cuda)
-        if options.checkpoint != ""
-        else default_checkpoint
-    )
+    torch.cuda.set_device(torch.device(f'cuda:{device}'))
 
+    checkpoint = (load_checkpoint(options.checkpoint, cuda=is_cuda) if options.checkpoint != "" else default_checkpoint)
+
+    # Load data
     train_data_loader, valid_data_loader, train_dataset, valid_dataset = get_train_valid_dataloader(options)
     print(
         "[+] Data\n",
+        f"Tmp data: {options.tmp_data}\n" if hasattr(options, 'tmp_data') else None,
         "Train path : {}\n".format(options.data.train),
         "Test path : {}\n".format(options.data.test),
         "Batch size : {}\n".format(options.batch_size),
@@ -142,19 +149,20 @@ def main(config_file):
         "The number of valid samples : {:,}\n".format(len(valid_dataset)),
     )
 
+    # Make model
     model = get_network(options)
     model_state = checkpoint.get("model")
     if model_state:
         model.load_state_dict(model_state)
         print(
-        "[+] Checkpoint\n",
-        "Resuming from epoch : {}\n".format(checkpoint["epoch"]),
-        "Train Accuracy : {:.5f}\n".format(checkpoint["train_accuracy"][-1]),
-        "Train Loss : {:.5f}\n".format(checkpoint["train_losses"][-1]),
-        "Valid Accuracy : {:.5f}\n".format(checkpoint["valid_accuracy"][-1]),
-        "Valid Loss : {:.5f}\n".format(checkpoint["valid_losses"][-1]),
+            "[+] Checkpoint\n",
+            "Resuming from epoch : {}\n".format(checkpoint["epoch"]),
+            "Train Accuracy : {:.5f}\n".format(checkpoint["train_accuracy"][-1]),
+            "Train Loss : {:.5f}\n".format(checkpoint["train_losses"][-1]),
+            "Valid Accuracy : {:.5f}\n".format(checkpoint["valid_accuracy"][-1]),
+            "Valid Loss : {:.5f}\n".format(checkpoint["valid_losses"][-1]),
         )
-    
+
     params_to_optimise = [
         param for param in model.parameters() if param.requires_grad
     ]
@@ -166,6 +174,7 @@ def main(config_file):
         ),
     )
 
+    # Set optimizer
     optimizer = get_optimizer(params_to_optimise, options)
     optimizer_state = checkpoint.get("optimizer")
     if optimizer_state:
@@ -178,10 +187,11 @@ def main(config_file):
     print(
         "[+] Optimizer\n",
         "Type: {}\n".format(options.optimizer.type),
-        "Learning rate: {:,}\n".format(options.optimizer.lr),
-        "Weight Decay: {:,}\n".format(options.optimizer.weight_decay),
+        "Learning rate: {:,}\n".format(float(options.optimizer.lr)),
+        "Weight Decay: {:,}\n".format(float(options.optimizer.weight_decay)),
     )
 
+    # Make directories for saving logs
     if not os.path.exists(options.prefix):
         os.makedirs(options.prefix)
     log_file = open(os.path.join(options.prefix, "log.txt"), "w")
@@ -189,8 +199,7 @@ def main(config_file):
 
     if options.print_epochs is None:
         options.print_epochs = options.num_epochs
-        
-    writer = init_tensorboard(name=options.prefix.strip("-"))
+
     start_epoch = checkpoint["epoch"]
     train_accuracy = checkpoint["train_accuracy"]
     train_recall = checkpoint["train_recall"]
@@ -205,6 +214,7 @@ def main(config_file):
     valid_early_stop = 0
     valid_best_loss = float('inf')
 
+    # Start training
     for epoch in range(options.num_epochs):
         start_time = time.time()
 
@@ -215,6 +225,7 @@ def main(config_file):
             pad=len(str(options.num_epochs)),
         )
 
+        # train
         train_result = run_epoch(
             options,
             train_data_loader,
@@ -232,6 +243,7 @@ def main(config_file):
 
         epoch_lr = lr_scheduler.get_last_lr()[-1]
 
+        # validation
         valid_result = run_epoch(
             options,
             valid_data_loader,
@@ -258,7 +270,7 @@ def main(config_file):
                 "train_precision": train_precision,
                 "train_recall": train_recall,
                 "valid_losses": valid_losses,
-                "valid_accuracy":valid_accuracy,
+                "valid_accuracy": valid_accuracy,
                 "valid_precision": valid_precision,
                 "valid_recall": valid_recall,
                 "lr": learning_rates,
@@ -299,19 +311,18 @@ def main(config_file):
             )
             print(output_string)
             log_file.write(output_string + "\n")
-            write_tensorboard(
-                writer,
-                start_epoch + epoch + 1,
-                train_result["loss"],
-                train_result["accuracy"],
-                train_result["precision"],
-                train_result["recall"],
-                valid_result["loss"],
-                valid_result["accuracy"],
-                valid_result["precision"],
-                valid_result["recall"],
-                model,
-            )
+
+            # Record log to wandb
+            log = {'epoch': start_epoch + epoch + 1,
+                   'train_loss': train_result["loss"],
+                   'train_accuracy': train_result["accuracy"],
+                   'train_precision': train_result["precision"],
+                   'train_recall': train_result["recall"],
+                   'valid_loss': valid_result["loss"],
+                   'valid_accuracy': valid_result["accuracy"],
+                   'valid_precision': valid_result["precision"],
+                   'valid_recall': valid_result["recall"]}
+            run.log(log)
 
         if valid_result["loss"] < valid_best_loss:
             valid_best_loss = valid_result["loss"]
@@ -323,7 +334,9 @@ def main(config_file):
                 print("EARLY STOPPING!!")
                 break
 
-        
+    # Record best epoch to wandb
+    run.summary['best_epoch'] = (start_epoch + epoch + 1) - 5
+
 
 if __name__ == "__main__":
     fire.Fire(main)

@@ -3,6 +3,8 @@ network: "ResNet"
 seed: 42
 device: 'cuda'
 
+#tmp_data: [320,3,224,224]
+
 data:
   train: "data/train.csv"
   test: "data/test.csv"
@@ -16,7 +18,7 @@ input_size:
   width: 224
 
 model:
-  pretrained: False
+  pretrained: True
   in_channels: 3
   init_weights: True
 
@@ -26,7 +28,7 @@ optimizer:
   weight_decay: 1e-2
 
 checkpoint: "" 
-test_checkpoint: ""
+test_checkpoint: "./log/ResNet/checkpoints/0008.pth"
 
 prefix: "./log/ResNet"
 

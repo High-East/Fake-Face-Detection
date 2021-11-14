@@ -5,31 +5,27 @@ python test.py --config_file configs/ResNet.yaml
 
 import os
 import random
-
-import cv2
+from psutil import virtual_memory
 import fire
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
-from torchsummary import summary
-from torchvision import models, transforms
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
+from tqdm import tqdm
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from psutil import virtual_memory
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchsummary import summary
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
 from flags import Flags
-from utils import get_network
+from utils import get_network, guarantee_numpy
 from checkpoint import load_checkpoint
 from dataset import FaceDataset
 from metrics import accuracy, precision, recall
+from cam import apply_cam
 
 
-def main(config_file):
-
+def main(config_file, cam=False):
     options = Flags(config_file).get()
 
     # Set random seed
@@ -63,16 +59,6 @@ def main(config_file):
 
     checkpoint = load_checkpoint(options.test_checkpoint, cuda=is_cuda)
     model.load_state_dict(checkpoint['model'])
-    start_epoch = checkpoint["epoch"]
-    train_accuracy = checkpoint["train_accuracy"]
-    train_recall = checkpoint["train_recall"]
-    train_precision = checkpoint["train_precision"]
-    train_losses = checkpoint["train_losses"]
-    valid_accuracy = checkpoint["valid_accuracy"]
-    valid_recall = checkpoint["valid_recall"]
-    valid_precision = checkpoint["valid_precision"]
-    valid_losses = checkpoint["valid_losses"]
-    learning_rates = checkpoint["lr"]
     model.to(options.device)
     model.eval()
 
@@ -96,10 +82,11 @@ def main(config_file):
     ])
 
     test = pd.read_csv(options.data.test)
-    test['path'] = test['path'].map(lambda x : './data' + x[12:])
+    test['path'] = test['path'].map(lambda x: './data' + x[12:])
 
     test_dataset = FaceDataset(image_label=test, transforms=transforms_test)
-    test_dataloader = DataLoader(test_dataset, batch_size=options.batch_size, shuffle=options.data.random_split, num_workers=options.num_workers)
+    test_dataloader = DataLoader(test_dataset, batch_size=options.batch_size, shuffle=options.data.random_split,
+                                 num_workers=options.num_workers)
 
     losses = []
     acces = []
@@ -131,6 +118,28 @@ def main(config_file):
         "{:10s}: {:2.8f}\n".format('Precision', np.mean(precisions)),
         "{:10s}: {:2.8f}\n".format('Recall', np.mean(recalls)),
     )
+
+    # GradCAM
+    if cam:
+        for idx in range(16):
+            rgb_img = images[idx].permute(1, 2, 0)
+            if targets[idx] == 0:
+                label = 'fake'
+            else:
+                label = 'real'
+            if options.network == 'ResNet':
+                target_layers = [model.layer1[-1], model.layer2[-1], model.layer3[-1], model.layer4[-1]]
+                for i, target in enumerate(target_layers, 1):
+                    apply_cam(model, guarantee_numpy(rgb_img), [target],
+                              title=f"{options.network} {i}th layer [{label}]")
+            elif options.network == 'EfficientNet':
+                target_layers = [model._blocks[-1]]
+                for i, target in enumerate(target_layers, 16):
+                    apply_cam(model, guarantee_numpy(rgb_img), [target],
+                              title=f"{options.network} {i}th layer [{label}]")
+            else:
+                raise ValueError(f"Not supported {options.network} for CAM.")
+
 
 if __name__ == '__main__':
     fire.Fire(main)

@@ -1,4 +1,4 @@
-# Fake Face Detection - 2021 XAI606 Project Proposal
+# Fake Face Detection
 
 XAI606 수업의 첫 번째 프로젝트를 위한 레포지토리입니다.  
 이 레포지토리의 대부분의 코드와 파일은 [이곳](https://github.com/minsuk-sung/2021-XAI606-Project-Proposal) 을 참고하였습니다.
